@@ -2,7 +2,21 @@ const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = requi
 const { Boom } = require("@hapi/boom")
 const pino = require("pino")
 const fs = require('fs')
-const readline = require('readline')
+const path = require('path')
+
+// ====== CLEANUP CORRUPTED AUTH FILES ======
+const cleanupAuth = () => {
+    const authDir = './auth_info_baileys'
+    if (fs.existsSync(authDir)) {
+        console.log('🧹 Cleaning up old auth files...')
+        try {
+            fs.rmSync(authDir, { recursive: true, force: true })
+            console.log('✅ Old auth files removed')
+        } catch (error) {
+            console.error('⚠️ Could not clean auth files:', error.message)
+        }
+    }
+}
 
 // ====== BOT SETTINGS ======
 let settings = {
@@ -50,44 +64,60 @@ const randomDelay = (min = 2000, max = 5000) => new Promise(resolve =>
     setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min)
 )
 
+let pairingCodeGenerated = false
+
 // ====== MAIN BOT FUNCTION ======
 async function startBot() {
+    console.log('🤖 Starting WhatsApp Bot...')
+    
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys')
     
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false
+        printQRInTerminal: false,
+        browser: ["Ubuntu", "Chrome", "20.0.04"]
     })
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
         
-        // ====== PAIRING CODE MODE (AUTO) ======
-        if (qr) {
+        console.log('📡 Connection Update:', { connection, qr: !!qr })
+        
+        // ====== PAIRING CODE MODE ======
+        if (qr && !pairingCodeGenerated) {
+            pairingCodeGenerated = true
             console.log('\n📱 *GENERATING PAIRING CODE...*\n')
             try {
                 const pairingCode = await sock.requestPairingCode(PHONE_NUMBER)
-                console.log(`\n✨ ✨ ✨ YOUR PAIRING CODE: ${pairingCode} ✨ ✨ ✨\n`)
-                console.log('📲 INSTRUCTIONS:')
-                console.log('1. Open WhatsApp on your phone')
-                console.log('2. Go to Settings > Devices > Link a device')
-                console.log('3. Select "Link with phone number"')
-                console.log('4. Enter the code above')
-                console.log('⏱️  Code expires in 60 seconds\n')
+                console.log('\n' + '='.repeat(60))
+                console.log('✨ ✨ ✨ YOUR PAIRING CODE: ' + pairingCode + ' ✨ ✨ ✨')
+                console.log('='.repeat(60))
+                console.log('\n📲 INSTRUCTIONS:')
+                console.log('1️⃣  Open WhatsApp on your phone')
+                console.log('2️⃣  Go to Settings > Devices > Link a device')
+                console.log('3️⃣  Select "Link with phone number"')
+                console.log('4️⃣  Enter the code above: ' + pairingCode)
+                console.log('\n⏱️  Code expires in 60 seconds')
+                console.log('='.repeat(60) + '\n')
             } catch (error) {
-                console.error('❌ Error generating pairing code:', error)
+                console.error('❌ Error generating pairing code:', error.message)
+                pairingCodeGenerated = false
             }
         }
         
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error?.output?.statusCode) !== DisconnectReason.loggedOut
-            console.log('Connection closed due to:', lastDisconnect?.error, 'reconnecting:', shouldReconnect)
+            console.log('❌ Connection closed:', lastDisconnect?.error?.message || 'Unknown error')
+            console.log('🔄 Attempting to reconnect...')
             if (shouldReconnect) {
-                startBot()
+                setTimeout(() => startBot(), 5000)
+            } else {
+                console.log('⚠️ Logged out. Please scan pairing code again.')
             }
         } else if (connection === 'open') {
-            console.log('✅ Bot connected successfully!')
+            console.log('\n✅ ✅ ✅ BOT CONNECTED SUCCESSFULLY! ✅ ✅ ✅\n')
+            pairingCodeGenerated = false
         }
     })
 
@@ -206,4 +236,11 @@ async function startBot() {
     })
 }
 
-startBot().catch(err => console.error('Bot error:', err))
+// Clean old auth and start bot
+console.log('\n🔧 Initializing Group Police Bot...\n')
+cleanupAuth()
+setTimeout(() => startBot().catch(err => {
+    console.error('❌ Bot error:', err.message)
+    console.log('🔄 Retrying in 10 seconds...')
+    setTimeout(() => startBot(), 10000)
+}), 2000)
