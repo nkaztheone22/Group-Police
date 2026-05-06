@@ -4,6 +4,11 @@ const pino = require("pino")
 const fs = require('fs')
 const path = require('path')
 
+// ====== FIX CRYPTO ISSUE ======
+if (typeof global.crypto === 'undefined') {
+    global.crypto = require('crypto')
+}
+
 // ====== CLEANUP CORRUPTED AUTH FILES ======
 const cleanupAuth = () => {
     const authDir = './auth_info_baileys'
@@ -65,182 +70,192 @@ const randomDelay = (min = 2000, max = 5000) => new Promise(resolve =>
 )
 
 let pairingCodeGenerated = false
+let isConnected = false
 
 // ====== MAIN BOT FUNCTION ======
 async function startBot() {
+    if (isConnected) return
+    
     console.log('🤖 Starting WhatsApp Bot...')
     
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys')
-    
-    const sock = makeWASocket({
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: ["Ubuntu", "Chrome", "20.0.04"]
-    })
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys')
+        
+        const sock = makeWASocket({
+            auth: state,
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: false,
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            syncFullHistory: false
+        })
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update
-        
-        console.log('📡 Connection Update:', { connection, qr: !!qr })
-        
-        // ====== PAIRING CODE MODE ======
-        if (qr && !pairingCodeGenerated) {
-            pairingCodeGenerated = true
-            console.log('\n📱 *GENERATING PAIRING CODE...*\n')
-            try {
-                const pairingCode = await sock.requestPairingCode(PHONE_NUMBER)
-                console.log('\n' + '='.repeat(60))
-                console.log('✨ ✨ ✨ YOUR PAIRING CODE: ' + pairingCode + ' ✨ ✨ ✨')
-                console.log('='.repeat(60))
-                console.log('\n📲 INSTRUCTIONS:')
-                console.log('1️⃣  Open WhatsApp on your phone')
-                console.log('2️⃣  Go to Settings > Devices > Link a device')
-                console.log('3️⃣  Select "Link with phone number"')
-                console.log('4️⃣  Enter the code above: ' + pairingCode)
-                console.log('\n⏱️  Code expires in 60 seconds')
-                console.log('='.repeat(60) + '\n')
-            } catch (error) {
-                console.error('❌ Error generating pairing code:', error.message)
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update
+            
+            // ====== PAIRING CODE MODE ======
+            if (qr && !pairingCodeGenerated) {
+                pairingCodeGenerated = true
+                console.log('\n📱 *GENERATING PAIRING CODE...*\n')
+                try {
+                    const pairingCode = await sock.requestPairingCode(PHONE_NUMBER)
+                    console.log('\n' + '='.repeat(60))
+                    console.log('✨ ✨ ✨ YOUR PAIRING CODE: ' + pairingCode + ' ✨ ✨ ✨')
+                    console.log('='.repeat(60))
+                    console.log('\n📲 INSTRUCTIONS:')
+                    console.log('1️⃣  Open WhatsApp on your phone')
+                    console.log('2️⃣  Go to Settings > Devices > Link a device')
+                    console.log('3️⃣  Select "Link with phone number"')
+                    console.log('4️⃣  Enter the code above: ' + pairingCode)
+                    console.log('\n⏱️  Code expires in 60 seconds')
+                    console.log('='.repeat(60) + '\n')
+                } catch (error) {
+                    console.error('❌ Error generating pairing code:', error.message)
+                    pairingCodeGenerated = false
+                }
+            }
+            
+            if (connection === 'close') {
+                isConnected = false
+                const shouldReconnect = (lastDisconnect?.error?.output?.statusCode) !== DisconnectReason.loggedOut
+                console.log('❌ Connection closed:', lastDisconnect?.error?.message || 'Unknown error')
+                if (shouldReconnect) {
+                    console.log('🔄 Reconnecting in 5 seconds...')
+                    setTimeout(() => startBot(), 5000)
+                } else {
+                    console.log('⚠️ Logged out. Restart the service to scan pairing code again.')
+                }
+            } else if (connection === 'open') {
+                isConnected = true
+                console.log('\n✅ ✅ ✅ BOT CONNECTED SUCCESSFULLY! ✅ ✅ ✅\n')
                 pairingCodeGenerated = false
             }
-        }
-        
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode) !== DisconnectReason.loggedOut
-            console.log('❌ Connection closed:', lastDisconnect?.error?.message || 'Unknown error')
-            console.log('🔄 Attempting to reconnect...')
-            if (shouldReconnect) {
-                setTimeout(() => startBot(), 5000)
-            } else {
-                console.log('⚠️ Logged out. Please scan pairing code again.')
-            }
-        } else if (connection === 'open') {
-            console.log('\n✅ ✅ ✅ BOT CONNECTED SUCCESSFULLY! ✅ ✅ ✅\n')
-            pairingCodeGenerated = false
-        }
-    })
+        })
 
-    sock.ev.on('creds.update', saveCreds)
+        sock.ev.on('creds.update', saveCreds)
 
-    // ====== MESSAGE HANDLER ======
-    sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0]
-        
-        if (!msg.message) return
-        if (msg.key.fromMe) return
-        
-        const sender = msg.key.remoteJid
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
-        const isGroup = sender.endsWith('@g.us')
-        
-        console.log(`[${new Date().toLocaleTimeString()}] ${sender}: ${text}`)
-
-        // ====== ANTI-LINK FEATURE ======
-        if (settings.antilink && isGroup) {
-            if (/(https?:\/\/[^\s]+|www\.[^\s]+)/gi.test(text)) {
-                if (!warnings[sender]) warnings[sender] = { count: 0, lastWarn: Date.now() }
-                warnings[sender].count++
-                warnings[sender].lastWarn = Date.now()
+        // ====== MESSAGE HANDLER ======
+        sock.ev.on('messages.upsert', async (m) => {
+            try {
+                const msg = m.messages[0]
                 
-                await sock.sendMessage(sender, { text: `⚠️ Link detected! Warnings: ${warnings[sender].count}/${settings.warnKick}` })
+                if (!msg.message) return
+                if (msg.key.fromMe) return
                 
-                if (warnings[sender].count >= settings.warnKick) {
-                    await sock.groupParticipantsUpdate(sender, [msg.key.participant], 'remove')
-                    delete warnings[sender]
-                    saveWarnings()
-                }
-                saveWarnings()
-                return
-            }
-        }
+                const sender = msg.key.remoteJid
+                const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
+                const isGroup = sender.endsWith('@g.us')
+                
+                console.log(`[${new Date().toLocaleTimeString()}] ${sender}: ${text}`)
 
-        // ====== ANTI-BAD WORDS FEATURE ======
-        if (settings.antiword && isGroup) {
-            for (let word of settings.badwords) {
-                if (text.toLowerCase().includes(word.toLowerCase())) {
-                    if (!warnings[msg.key.participant]) warnings[msg.key.participant] = { count: 0, lastWarn: Date.now() }
-                    warnings[msg.key.participant].count++
-                    warnings[msg.key.participant].lastWarn = Date.now()
-                    
-                    await sock.sendMessage(sender, { text: `⚠️ Bad word detected! Warnings: ${warnings[msg.key.participant].count}/${settings.warnKick}` })
-                    
-                    if (warnings[msg.key.participant].count >= settings.warnKick) {
-                        await sock.groupParticipantsUpdate(sender, [msg.key.participant], 'remove')
-                        delete warnings[msg.key.participant]
+                // ====== ANTI-LINK FEATURE ======
+                if (settings.antilink && isGroup) {
+                    if (/(https?:\/\/[^\s]+|www\.[^\s]+)/gi.test(text)) {
+                        if (!warnings[sender]) warnings[sender] = { count: 0, lastWarn: Date.now() }
+                        warnings[sender].count++
+                        warnings[sender].lastWarn = Date.now()
+                        
+                        await sock.sendMessage(sender, { text: `⚠️ Link detected! Warnings: ${warnings[sender].count}/${settings.warnKick}` })
+                        
+                        if (warnings[sender].count >= settings.warnKick) {
+                            await sock.groupParticipantsUpdate(sender, [msg.key.participant], 'remove')
+                            delete warnings[sender]
+                            saveWarnings()
+                        }
                         saveWarnings()
+                        return
                     }
-                    saveWarnings()
-                    return
                 }
+
+                // ====== ANTI-BAD WORDS FEATURE ======
+                if (settings.antiword && isGroup) {
+                    for (let word of settings.badwords) {
+                        if (text.toLowerCase().includes(word.toLowerCase())) {
+                            if (!warnings[msg.key.participant]) warnings[msg.key.participant] = { count: 0, lastWarn: Date.now() }
+                            warnings[msg.key.participant].count++
+                            warnings[msg.key.participant].lastWarn = Date.now()
+                            
+                            await sock.sendMessage(sender, { text: `⚠️ Bad word detected! Warnings: ${warnings[msg.key.participant].count}/${settings.warnKick}` })
+                            
+                            if (warnings[msg.key.participant].count >= settings.warnKick) {
+                                await sock.groupParticipantsUpdate(sender, [msg.key.participant], 'remove')
+                                delete warnings[msg.key.participant]
+                                saveWarnings()
+                            }
+                            saveWarnings()
+                            return
+                        }
+                    }
+                }
+
+                // ====== BOT COMMANDS ======
+                if (text.startsWith('!')) {
+                    const args = text.slice(1).split(' ')
+                    const command = args[0].toLowerCase()
+
+                    // Anti-ban delay
+                    if (settings.antiBanDelay) await randomDelay()
+
+                    switch(command) {
+                        case 'help':
+                            await sock.sendMessage(sender, { 
+                                text: `📋 *Bot Commands:*\n\n!help - Show this message\n!settings - Show current settings\n!antilink on/off - Toggle antilink\n!antiword on/off - Toggle antiword\n!badwords list - Show bad words list` 
+                            })
+                            break
+
+                        case 'settings':
+                            await sock.sendMessage(sender, { 
+                                text: `⚙️ *Current Settings:*\n\nAnti-link: ${settings.antilink ? '✅' : '❌'}\nAnti-word: ${settings.antiword ? '✅' : '❌'}\nWarn Kick: ${settings.warnKick}\nAnti-ban delay: ${settings.antiBanDelay ? '✅' : '❌'}` 
+                            })
+                            break
+
+                        case 'antilink':
+                            if (args[1] === 'on') {
+                                settings.antilink = true
+                                saveSettings()
+                                await sock.sendMessage(sender, { text: '✅ Anti-link enabled' })
+                            } else if (args[1] === 'off') {
+                                settings.antilink = false
+                                saveSettings()
+                                await sock.sendMessage(sender, { text: '❌ Anti-link disabled' })
+                            }
+                            break
+
+                        case 'antiword':
+                            if (args[1] === 'on') {
+                                settings.antiword = true
+                                saveSettings()
+                                await sock.sendMessage(sender, { text: '✅ Anti-word enabled' })
+                            } else if (args[1] === 'off') {
+                                settings.antiword = false
+                                saveSettings()
+                                await sock.sendMessage(sender, { text: '❌ Anti-word disabled' })
+                            }
+                            break
+
+                        case 'badwords':
+                            if (args[1] === 'list') {
+                                await sock.sendMessage(sender, { 
+                                    text: `🚫 *Bad Words List:*\n\n${settings.badwords.map((w, i) => `${i + 1}. ${w}`).join('\n')}` 
+                                })
+                            }
+                            break
+
+                        default:
+                            await sock.sendMessage(sender, { text: '❓ Unknown command. Type !help for available commands.' })
+                    }
+                }
+            } catch (error) {
+                console.error('Error handling message:', error.message)
             }
-        }
-
-        // ====== BOT COMMANDS ======
-        if (text.startsWith('!')) {
-            const args = text.slice(1).split(' ')
-            const command = args[0].toLowerCase()
-
-            // Anti-ban delay
-            if (settings.antiBanDelay) await randomDelay()
-
-            switch(command) {
-                case 'help':
-                    await sock.sendMessage(sender, { 
-                        text: `📋 *Bot Commands:*\n\n!help - Show this message\n!settings - Show current settings\n!antilink on/off - Toggle antilink\n!antiword on/off - Toggle antiword\n!badwords list - Show bad words list` 
-                    })
-                    break
-
-                case 'settings':
-                    await sock.sendMessage(sender, { 
-                        text: `⚙️ *Current Settings:*\n\nAnti-link: ${settings.antilink ? '✅' : '❌'}\nAnti-word: ${settings.antiword ? '✅' : '❌'}\nWarn Kick: ${settings.warnKick}\nAnti-ban delay: ${settings.antiBanDelay ? '✅' : '❌'}` 
-                    })
-                    break
-
-                case 'antilink':
-                    if (args[1] === 'on') {
-                        settings.antilink = true
-                        saveSettings()
-                        await sock.sendMessage(sender, { text: '✅ Anti-link enabled' })
-                    } else if (args[1] === 'off') {
-                        settings.antilink = false
-                        saveSettings()
-                        await sock.sendMessage(sender, { text: '❌ Anti-link disabled' })
-                    }
-                    break
-
-                case 'antiword':
-                    if (args[1] === 'on') {
-                        settings.antiword = true
-                        saveSettings()
-                        await sock.sendMessage(sender, { text: '✅ Anti-word enabled' })
-                    } else if (args[1] === 'off') {
-                        settings.antiword = false
-                        saveSettings()
-                        await sock.sendMessage(sender, { text: '❌ Anti-word disabled' })
-                    }
-                    break
-
-                case 'badwords':
-                    if (args[1] === 'list') {
-                        await sock.sendMessage(sender, { 
-                            text: `🚫 *Bad Words List:*\n\n${settings.badwords.map((w, i) => `${i + 1}. ${w}`).join('\n')}` 
-                        })
-                    }
-                    break
-
-                default:
-                    await sock.sendMessage(sender, { text: '❓ Unknown command. Type !help for available commands.' })
-            }
-        }
-    })
+        })
+    } catch (error) {
+        console.error('❌ Bot error:', error.message)
+        console.log('🔄 Retrying in 10 seconds...')
+        setTimeout(() => startBot(), 10000)
+    }
 }
 
 // Clean old auth and start bot
 console.log('\n🔧 Initializing Group Police Bot...\n')
 cleanupAuth()
-setTimeout(() => startBot().catch(err => {
-    console.error('❌ Bot error:', err.message)
-    console.log('🔄 Retrying in 10 seconds...')
-    setTimeout(() => startBot(), 10000)
-}), 2000)
+setTimeout(() => startBot(), 2000)
