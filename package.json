@@ -1,0 +1,26 @@
+{
+  "name": "group-police",
+  "version": "1.0.0",
+  "description": "WhatsApp bot for group moderation with anti-link and anti-bad words features",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "group-moderation",
+    "baileys"
+  ],
+  "author": "nkaztheone22",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.5.0",
+    "@hapi/boom": "^10.0.1",
+    "pino": "^8.16.2"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
