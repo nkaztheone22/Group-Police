@@ -16,6 +16,9 @@ let settings = {
     ],
 }
 
+// ====== PHONE NUMBER FOR PAIRING ======
+const PHONE_NUMBER = "27722044535"
+
 // ====== WARNINGS DATABASE ======
 let warnings = {}
 const warningsFile = './warnings.json'
@@ -47,15 +50,6 @@ const randomDelay = (min = 2000, max = 5000) => new Promise(resolve =>
     setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min)
 )
 
-// Question prompt for pairing code input
-const question = (text) => new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    rl.question(text, (answer) => {
-        rl.close()
-        resolve(answer)
-    })
-})
-
 // ====== MAIN BOT FUNCTION ======
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys')
@@ -69,12 +63,21 @@ async function startBot() {
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
         
-        // ====== PAIRING CODE MODE ======
+        // ====== PAIRING CODE MODE (AUTO) ======
         if (qr) {
-            console.log('\n📱 *PAIRING CODE MODE*\n')
-            const pairingCode = await sock.requestPairingCode(await question('Enter your phone number (with country code, e.g., 1234567890): '))
-            console.log(`\n✨ Your pairing code: ${pairingCode}\n`)
-            console.log('📲 Enter this code in WhatsApp:\n1. Open WhatsApp on your phone\n2. Go to Settings > Devices > Link a device\n3. Select "Link with phone number"\n4. Enter the code above\n\n')
+            console.log('\n📱 *GENERATING PAIRING CODE...*\n')
+            try {
+                const pairingCode = await sock.requestPairingCode(PHONE_NUMBER)
+                console.log(`\n✨ ✨ ✨ YOUR PAIRING CODE: ${pairingCode} ✨ ✨ ✨\n`)
+                console.log('📲 INSTRUCTIONS:')
+                console.log('1. Open WhatsApp on your phone')
+                console.log('2. Go to Settings > Devices > Link a device')
+                console.log('3. Select "Link with phone number"')
+                console.log('4. Enter the code above')
+                console.log('⏱️  Code expires in 60 seconds\n')
+            } catch (error) {
+                console.error('❌ Error generating pairing code:', error)
+            }
         }
         
         if (connection === 'close') {
